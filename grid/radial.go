@@ -90,7 +90,7 @@ func CreateRadialSectors(centerLon, centerLat, maxRadius float64, numSectors, nu
 				}
 
 				// Замыкаем полигон, добавляя первую точку внешнего радиуса
-				sectorPoints = append(sectorPoints, sectorPoints[1])
+				sectorPoints = append(sectorPoints, sectorPoints[0])
 			} else {
 				// Добавляем точки на внутреннем радиусе
 				numInnerPoints := int(math.Max(4, math.Ceil((endAngle-startAngle)*innerRadius/50)))

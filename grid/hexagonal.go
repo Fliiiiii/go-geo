@@ -3,129 +3,105 @@ package grid
 import (
 	"math"
 
-	"github.com/Fliiiiii/go-geo/calc"
 	"github.com/Fliiiiii/go-geo/types"
 )
 
-// CreateHexagonalGridCells создает гексагональную сетку в виде полигонов (шестиугольников) с учетом кривизны Земли
-// minLon, minLat - координаты юго-западного угла
-// maxLon, maxLat - координаты северо-восточного угла
-// spacing - расстояние между центрами соседних шестиугольников (в метрах)
-func CreateHexagonalGridCells(minLon, minLat, maxLon, maxLat, spacing float64) types.MultiPolygon {
-	var gridCells types.MultiPolygon
-
-	// Проверяем корректность границ
-	if minLon > maxLon || minLat > maxLat || spacing <= 0 {
-		return gridCells
+// CreateHexagon создает шестиугольник с заданными параметрами
+// lon - долгота центра шестиугольника
+// lat - широта центра шестиугольника
+// r - радиус шестиугольника
+// k - коэффициент коррекции для проекции Меркатора
+func CreateHexagon(lon, lat, r, k float64) types.Polygon {
+	// Начальный угол (в радианах)
+	var angle float64
+	// Создаем массив для 7 точек (6 вершин + дублирование первой точки для замыкания)
+	points := make([]types.Point, 7)
+	for i := 0; i < 6; i++ {
+		// Вычисляем координаты точки:
+		// - Долгота: смещение от центра по синусу угла
+		// - Широта: смещение от центра по косинусу угла с коррекцией Меркатора
+		p := types.NewPoint((math.Sin(angle)*r + lon), (math.Cos(angle)*r*k + lat))
+		// Увеличиваем угол на 60 градусов (π/3 радиан)
+		angle += math.Pi / 3
+		points[i] = p
 	}
-
-	// Центры гексагонов
-	centers := createHexagonalGrid(minLon, minLat, maxLon, maxLat, spacing)
-
-	// Если сетка пуста, возвращаем пустой результат
-	if len(centers) == 0 {
-		return gridCells
-	}
-
-	// Радиус шестиугольника
-	radius := spacing / 2
-
-	// Создаем полигон для каждого центра
-	for _, center := range centers {
-		var hexagonPoints types.LineString
-
-		// Создаем 6 вершин шестиугольника, начиная с угла 30 градусов
-		// для получения вертикально ориентированного шестиугольника
-		for i := 0; i < 6; i++ {
-			// Угол в радианах (начиная с 30 и с шагом 60 градусов)
-			angle := (30.0 + float64(i)*60.0) * (math.Pi / 180.0)
-
-			// Вычисляем точку назначения на расстоянии radius от центра в направлении angle
-			vertex := calc.CalculateDestinationPoint(center, radius, angle)
-			hexagonPoints = append(hexagonPoints, vertex)
-		}
-
-		// Замыкаем полигон, добавляя первую точку в конец
-		hexagonPoints = append(hexagonPoints, hexagonPoints[0])
-
-		// Создаем полигон и добавляем в сетку
-		hexagon := types.NewPolygon(hexagonPoints)
-		gridCells = append(gridCells, hexagon)
-	}
-
-	return gridCells
+	// Замыкаем полигон, дублируя первую точку
+	points[6] = points[0]
+	return types.NewPolygon(types.NewLineString(points...))
 }
 
-func createHexagonalGrid(minLon, minLat, maxLon, maxLat, spacing float64) []types.Point {
-	var grid []types.Point
+// CreateHexagonalGrid создает сетку шестиугольников с заданными параметрами
+// minLon, minLat - координаты юго-западного угла
+// maxLon, maxLat - координаты северо-восточного угла
+// r - радиус шестиугольника в градусах по широте
+func CreateHexagonalGrid(minLon, minLat, maxLon, maxLat, r float64) types.MultiPolygon {
+	var M types.MultiPolygon
 
 	// Проверяем корректность границ
-	if minLon > maxLon || minLat > maxLat || spacing <= 0 {
-		return grid
+	if minLat > maxLat || minLon > maxLon {
+		return M // Возвращаем пустую карту при некорректных границах
 	}
 
-	// Константы для гексагональной сетки
-	const sine60 = 0.866025404 // sin(60°)
+	// Ограничиваем широту до диапазона [-90, 90]
+	if minLat < -90 {
+		minLat = -90
+	}
+	if maxLat > 90 {
+		maxLat = 90
+	}
 
-	// Шаг по горизонтали (расстояние между соседними точками в ряду)
-	eastBearing := 90.0 * (math.Pi / 180.0) // восток (в радианах)
+	// Ограничиваем долготу до диапазона [-180, 180]
+	if minLon < -180 {
+		minLon = -180
+	}
+	if maxLon > 180 {
+		maxLon = 180
+	}
 
-	// Вертикальный шаг между рядами
-	rowHeight := spacing * sine60
+	// Шаг между центрами шестиугольников по широте
+	deltaLat := r * 3
+	// Шаг между центрами шестиугольников по долготе
+	deltaLon := math.Sin(math.Pi/3) * r
 
-	// Максимальное количество шагов (для предотвращения бесконечного цикла)
-	maxSteps := 10000
+	// Цикл по широте - создаем ряды шестиугольников
+	for lat := minLat; lat <= maxLat; {
+		// Вычисляем коэффициент Меркатора для текущей широты
+		// Это нужно для компенсации искажений проекции (сжатие по долготе при удалении от экватора)
+		deltaMerc := math.Cos(lat * math.Pi / 180)
 
-	// Создаем ряды сетки
-	currentRowY := minLat
-	currentRow := 0
+		// флаг для смещения шестиугольников в четных/нечетных рядах (шахматный порядок)
+		b := false
 
-	for currentRowY <= maxLat && currentRow < maxSteps {
-		// Определяем стартовую точку для текущего ряда
-		var rowStartLon float64
-
-		// Смещение для нечетных рядов
-		if currentRow%2 == 1 {
-			// Смещение на половину ширины ячейки для нечетных рядов
-			halfSpacingLon := calc.CalculateDestinationPoint(
-				types.NewPoint(minLon, currentRowY),
-				spacing/2,
-				eastBearing,
-			).GetLongitude()
-			rowStartLon = halfSpacingLon
-		} else {
-			rowStartLon = minLon
-		}
-
-		// Создаем точки для текущего ряда
-		currentPoint := types.NewPoint(rowStartLon, currentRowY)
-		grid = append(grid, currentPoint)
-
-		stepsCount := 0
-		for stepsCount < maxSteps {
-			// Двигаемся на восток на расстояние spacing
-			nextPoint := calc.CalculateDestinationPoint(currentPoint, spacing, eastBearing)
-
-			// Проверяем, не вышли ли за границы
-			if nextPoint.GetLongitude() > maxLon {
-				break
+		// Цикл по долготе - создаем шестиугольники в текущем ряду
+		for lon := minLon; lon <= maxLon; lon += deltaLon {
+			var p types.Polygon
+			// В зависимости от флага b, создаем шестиугольник со смещением или без
+			if b {
+				p = CreateHexagon(lon, lat, r, deltaMerc)
+			} else {
+				p = CreateHexagon(lon, lat+r*1.5*deltaMerc, r, deltaMerc)
 			}
 
-			grid = append(grid, nextPoint)
-			currentPoint = nextPoint
-			stepsCount++
+			M = append(M, p)
+			// Инвертируем флаг для следующего шестиугольника в ряду
+			b = !b
 		}
 
-		// Переходим к следующему ряду
-		northBearing := 0.0 * (math.Pi / 180.0) // север (в радианах)
-		currentRowY = calc.CalculateDestinationPoint(
-			types.NewPoint(minLon, currentRowY),
-			rowHeight,
-			northBearing,
-		).GetLatitude()
-
-		currentRow++
+		// Увеличиваем широту с учетом коэффициента Меркатора
+		// Это компенсирует искажения проекции и обеспечивает равномерное распределение шестиугольников
+		lat += deltaLat * deltaMerc
 	}
 
-	return grid
+	return M
+}
+
+// CreateHexagonalGridWithDensity создает гексагональную сетку с заданной плотностью
+// minLon, minLat - координаты юго-западного угла
+// maxLon, maxLat - координаты северо-восточного угла
+// density - плотность сетки (количество шестиугольников на градус широты)
+func CreateHexagonalGridWithDensity(minLon, minLat, maxLon, maxLat, density float64) types.MultiPolygon {
+	// Рассчитываем радиус шестиугольников на основе плотности
+	// Чем выше плотность, тем меньше радиус
+	r := 1.0 / (density * 3)
+	return CreateHexagonalGrid(minLat, maxLat, minLon, maxLon, r)
 }
